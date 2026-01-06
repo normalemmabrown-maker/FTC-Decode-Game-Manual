@@ -1,50 +1,26 @@
-import os
+# app.py
+import time
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, PrivateAttr
-import requests
-from dotenv import load_dotenv
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
-from llama_index.core.embeddings import BaseEmbedding
-from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel
+from llama_index.core import VectorStoreIndex, Settings, StorageContext, load_index_from_storage
+from llama_index.embeddings.cohere import CohereEmbedding
 
-load_dotenv()
-API_KEY = os.getenv("API_KEY")
+API_KEY = ""
+COHERE_API_KEY = ""
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+http_client = httpx.AsyncClient(timeout=60.0)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+Settings.embed_model = CohereEmbedding(
+    cohere_api_key=COHERE_API_KEY,
+    model_name="embed-english-light-v3.0",
 )
 
-class SentenceTransformerEmbedding(BaseEmbedding):
-    _model: SentenceTransformer = PrivateAttr()
-
-    def __init__(self, model_name="BAAI/bge-small-en-v1.5", **kwargs):
-        super().__init__(**kwargs)
-        object.__setattr__(self, '_model', SentenceTransformer(model_name))
-
-    def _get_query_embedding(self, query: str):
-        return self._model.encode(query).tolist()
-
-    def _get_text_embedding(self, text: str):
-        return self._model.encode(text).tolist()
-
-    async def _aget_query_embedding(self, query: str):
-        return self._get_query_embedding(query)
-
-    async def _aget_text_embedding(self, text: str):
-        return self._get_text_embedding(text)
-
-print("Loading PDF and creating vector database...")
-Settings.embed_model = SentenceTransformerEmbedding("BAAI/bge-small-en-v1.5")
-documents = SimpleDirectoryReader(input_files=["game_manual.pdf"]).load_data()
-index = VectorStoreIndex.from_documents(documents)
-print("Vector database created!\n")
+storage_context = StorageContext.from_defaults(persist_dir="./storage")
+index = load_index_from_storage(storage_context)
 
 class ChatRequest(BaseModel):
     message: str
@@ -54,67 +30,41 @@ class ChatResponse(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "FTC RAG Backend API is running", "status": "healthy"}
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+    return {"message": "Running"}
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    if not request.message or not request.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-
+async def chat(request: ChatRequest):
+    start = time.time()
     query = request.message.strip()
+    
+    ret_start = time.time()
+    retriever = index.as_retriever(similarity_top_k=5)
+    nodes = await retriever.aretrieve(query)
+    context = "\n\n".join([node.text for node in nodes])
+    print(f"⏱️ Retrieval: {time.time() - ret_start:.2f}s")
+    
+    prompt = f"""You are an FTC game rules expert. Use the following game rules to provide a comprehensive and detailed answer to the question.
 
-    try:
-        print(f"Searching for: {query}")
+Game Rules:
+{context}
 
-        retriever = index.as_retriever(similarity_top_k=3)
-        nodes = retriever.retrieve(query)
+Question: {query}
 
-        context = "\n\n".join([node.text for node in nodes])
-
-        prompt = f"""Use the following game rules to answer the question.
-    Game Rules:
-    {context}
-    Question: {query}
-    Answer based only on the rules provided:"""
-
-        if not API_KEY:
-            raise HTTPException(
-                status_code=500,
-                detail="API_KEY not found in environment variables"
-            )
-
-        response = requests.post(
-            "https://ai.hackclub.com/proxy/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/codestral-embed-2505",
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
-            }
-        )
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Error from AI service: {response.text}"
-            )
-
-        answer = response.json()["choices"][0]["message"]["content"]
-        print(f"\n Answer: {answer}\n")
-        print("-" * 60)
-
-        return ChatResponse(response=answer)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+Provide a thorough one-paragraph max answer based on the rules provided. Include:
+- Main answer with specific details
+- Relevant rule numbers/sections when applicable
+- Any important exceptions or edge cases
+- Examples if helpful
+- Use bullet points where applicable and make sure its easily readable to all humans 
+Answer:"""    
+    api_start = time.time()
+    response = await http_client.post(
+        "https://ai.hackclub.com/proxy/v1/chat/completions",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"model": "qwen/qwen3-32b", "messages": [{"role": "user", "content": prompt}]}
+    )
+    print(f"⏱️ AI API: {time.time() - api_start:.2f}s")
+    
+    answer = response.json()["choices"][0]["message"]["content"]
+    print(f"⏱️ Total: {time.time() - start:.2f}s")
+    return ChatResponse(response=answer)
