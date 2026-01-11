@@ -49,7 +49,10 @@ class ChatResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Running"}
-
+    
+@app.head("/")
+def head_root():
+    return {}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -94,3 +97,4 @@ Answer:"""
     answer = response.json()["choices"][0]["message"]["content"]
     print(f"⏱️ Total: {time.time() - start:.2f}s")
     return ChatResponse(response=answer)
+
