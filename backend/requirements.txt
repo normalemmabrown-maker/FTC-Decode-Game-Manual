@@ -1,6 +1,8 @@
 requests==2.31.0
 llama-index>=0.11.0
 llama-index-core>=0.11.0
+llama-index-embeddings-cohere>=0.1.0
+cohere>=4.0.0
 torch>=2.0.0
 sentence-transformers>=2.2.0
 python-dotenv>=1.0.0
